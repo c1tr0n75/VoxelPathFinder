@@ -24,7 +24,7 @@ try:
     print("✅ Successfully imported PathfindingNetwork and PathfindingLoss")
 except ImportError as e:
     print(f"❌ Error importing neural network modules: {e}")
-    print("Please ensure '3DPathPlanning_nn.py' is in the current directory")
+    print("Please ensure 'pathfinding_nn.py' is in the current directory")
     sys.exit(1)
 
 # Import the training pipeline (assuming it's saved as training_pipeline.py)

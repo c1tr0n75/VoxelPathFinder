@@ -1,3 +1,6 @@
-pip install torch torchvision torchaudio
-pip install numpy matplotlib tqdm
-pip install pathlib argparse json datetime
+torch
+torchvision
+torchaudio
+numpy
+matplotlib
+tqdm
