@@ -1,10 +1,12 @@
 # 3D Path Planning Neural Network
 
-This repository contains code and tools for training and evaluating a neural network for 3D path planning tasks. The project includes dataset generation, inspection utilities, model training scripts, and sample datasets.
+This repository contains code and tools for training and evaluating a neural network for 3D path planning tasks, designed to be used within the **Blender 3D environment**. The project includes dataset generation, inspection utilities, model training scripts, and sample datasets.
+
+> **Note:** This project is intended to be used within Blender 3D, leveraging its environment for data generation and visualization.
 
 ## Features
 
-- Synthetic 3D path planning dataset generation
+- Synthetic 3D path planning dataset generation (with Blender 3D)
 - Neural network model for pathfinding
 - Training and evaluation scripts
 - Dataset inspection tools
@@ -33,6 +35,7 @@ This repository contains code and tools for training and evaluating a neural net
 ### Prerequisites
 
 - Python 3.7+
+- Blender 3D (for dataset generation and visualization)
 - pip
 
 ### Installation
@@ -80,6 +83,7 @@ Contributions are welcome! Please open issues or submit pull requests for improv
 
 ## Acknowledgements
 
-- Inspired by research in 3D path planning and neural networks, made with the help of Claude by Anthropic.
+- This project was developed with the assistance of **Claude Code by Anthropic**.
+- Inspired by research in 3D path planning and neural networks, and made possible by the Blender 3D community.
 - Thanks to all contributors and open-source libraries used in this project.
 
