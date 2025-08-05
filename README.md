@@ -2,7 +2,7 @@
 
 This repository contains code and tools for training and evaluating a neural network for 3D path planning tasks, designed to be used within the **Blender 3D environment**. The project includes dataset generation, inspection utilities, model training scripts, and sample datasets.
 
-> **Note:** This project is intended to be used within Blender 3D, leveraging its environment for data generation and visualization.
+> **Note:** This project is intended to be used within Blender 3D, leveraging its environment for data generation and visualization. A special mention for Gautier for the great idea!
 
 ## Features
 
