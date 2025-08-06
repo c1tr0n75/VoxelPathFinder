@@ -221,8 +221,7 @@ class PathPlannerTransformer(nn.Module):
     def _create_positional_encoding(self, max_len, d_model):
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * 
-                           -(np.log(10000.0) / d_model))
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * -(np.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         return pe.unsqueeze(0)
@@ -279,23 +278,27 @@ class PathPlannerTransformer(nn.Module):
         return mask
     
     def _generate_path(self, memory, batch_size):
-        """Generate path sequence autoregressively with early stopping"""
+        """
+        Generate path sequence autoregressively, handling batches correctly.
+        Fixes bugs related to premature stopping and inclusion of special tokens.
+        """
         device = memory.device
-        generated_actions = []
         
         # Start with START token
-        current_input = torch.full((batch_size, 1), self.start_token_id, 
-                                  dtype=torch.long, device=device)
+        input_seq = torch.full((batch_size, 1), self.start_token_id, dtype=torch.long, device=device)
         
+        # Keep track of sequences that have generated an END token
+        is_finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
         for step in range(self.max_sequence_length):
             # Embed current sequence
-            embedded = self.action_embed(current_input)
+            embedded = self.action_embed(input_seq)
             seq_len = embedded.size(1)
             embedded = embedded + self.pos_encoding[:, :seq_len, :]
-            
+
             # Generate causal mask
             tgt_mask = self._generate_square_subsequent_mask(seq_len).to(device)
-            
+
             # Forward pass
             output = self.transformer_decoder(
                 tgt=embedded,
@@ -303,31 +306,57 @@ class PathPlannerTransformer(nn.Module):
                 tgt_mask=tgt_mask
             )
             
-            # Get next action probabilities
+            # Get next action probabilities from the last token in the sequence
             next_action_logits = self.output_proj(output[:, -1, :])
             next_actions = torch.argmax(next_action_logits, dim=-1, keepdim=True)
             
-            # Check for early stopping with END token
+            # Append the predicted actions to the sequence
+            input_seq = torch.cat([input_seq, next_actions], dim=1)
+            
+            # Update the finished mask for any sequence that just produced an END token
             if self.use_end_token:
-                # Check if any batch has generated END token
-                end_mask = (next_actions == self.end_token_id).squeeze(-1)
-                if end_mask.any():
-                    # For simplicity, stop generation for all batches when any generates END
-                    break
+                is_finished |= (next_actions.squeeze(-1) == self.end_token_id)
             
-            # Only append valid actions (0-5), not special tokens
-            valid_action_mask = next_actions < self.num_actions
-            if valid_action_mask.any():
-                generated_actions.append(next_actions)
-            
-            # Update input sequence
-            current_input = torch.cat([current_input, next_actions], dim=1)
+            # If all sequences in the batch are finished, we can stop early
+            if is_finished.all():
+                break
         
-        if len(generated_actions) > 0:
-            return torch.cat(generated_actions, dim=1)
-        else:
-            # Return empty sequence if stopped immediately
+        # Post-processing to create a clean, dense tensor of valid actions
+        # Remove the initial START token from all sequences
+        raw_paths = input_seq[:, 1:]
+        
+        clean_paths_list = []
+        max_len = 0
+        
+        for i in range(batch_size):
+            path = []
+            for token_id in raw_paths[i]:
+                # Stop decoding for this path if an END token is found
+                if self.use_end_token and token_id.item() == self.end_token_id:
+                    break
+                # Only include valid movement actions in the final path
+                if token_id.item() < self.num_actions:
+                    path.append(token_id.item())
+            
+            clean_paths_list.append(path)
+            if len(path) > max_len:
+                max_len = len(path)
+        
+        # Return an empty tensor if no valid actions were generated
+        if max_len == 0:
             return torch.zeros(batch_size, 0, dtype=torch.long, device=device)
+        
+        # Pad all paths to the length of the longest path in the batch
+        # We use the END token ID for padding, as downstream functions like
+        # check_collisions are designed to ignore non-action tokens.
+        pad_value = self.end_token_id if self.use_end_token else self.num_actions
+        padded_paths = torch.full((batch_size, max_len), pad_value, dtype=torch.long, device=device)
+        
+        for i, path in enumerate(clean_paths_list):
+            if len(path) > 0:
+                padded_paths[i, :len(path)] = torch.tensor(path, dtype=torch.long, device=device)
+                
+        return padded_paths
 
 
 class PathfindingNetwork(nn.Module):
