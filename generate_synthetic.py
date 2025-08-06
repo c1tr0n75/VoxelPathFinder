@@ -106,7 +106,7 @@ def count_turns(actions):
     return sum(1 for i in range(1, len(actions)) if actions[i] != actions[i - 1])
 
 # --------------------------------------------------
-# 🏗️  WORLD GENERATION HELPERS
+#   WORLD GENERATION HELPERS
 # --------------------------------------------------
 
 def set_boundaries(occ):
@@ -154,7 +154,7 @@ def random_free_cell(occ):
             return (x, y, z)
 
 # --------------------------------------------------
-# 🚀  MAIN
+#  MAIN
 # --------------------------------------------------
 if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
