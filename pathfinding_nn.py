@@ -433,12 +433,12 @@ class PathfindingNetwork(nn.Module):
         
         # Action to direction mapping
         directions = torch.tensor([
-            [1, 0, 0],   # Forward (x+)
-            [-1, 0, 0],  # Back (x-)
-            [0, 1, 0],   # Left (y+)
-            [0, -1, 0],  # Right (y-)
-            [0, 0, 1],   # Up (z+)
-            [0, 0, -1]   # Down (z-)
+            [1, 0, 0],   # Forward (z+)
+            [-1, 0, 0],  # Back (z-)
+            [0, 1, 0],   # Left (x+)
+            [0, -1, 0],  # Right (x-)
+            [0, 0, 1],   # Up (y+)
+            [0, 0, -1]   # Down (y-)
         ], dtype=torch.long, device=device)
         
         collision_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)

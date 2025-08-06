@@ -99,7 +99,7 @@ def visualize_sample(sample_file_path):
         # Action mapping for readability
         action_names = ['FORWARD', 'BACK', 'LEFT', 'RIGHT', 'UP', 'DOWN']
         action_sequence = [action_names[action] for action in target_actions]
-        print(f"Action sequence: {action_sequence[:10]}{'...' if len(action_sequence) > 10 else ''}")
+        print(f"Action sequence: {action_sequence[:23]}{'...' if len(action_sequence) > 23 else ''}")
         
         return True
         
@@ -116,3 +116,4 @@ if __name__ == "__main__":
     if sample_files:
         print("\n" + "="*60)
         visualize_sample(sample_files[0])
+        print("\n" + " Action mapping : " + "Forward (z+), Back (z-), Left (x+), Right (x-), Up (y+), Down (y-)")
