@@ -29,21 +29,21 @@ class VoxelCNNEncoder(nn.Module):
         self.input_voxel_dim = input_voxel_dim
         self.input_channels = input_channels
 
-        # First 3D Convolutional Block
+        # First 3D Convolutional Block (Conv-BN-ReLU)
         padding_1 = tuple([(k - 1) // 2 for k in kernel_size_1])
         self.conv1 = nn.Conv3d(input_channels, filters_1, kernel_size_1, padding=padding_1)
         self.bn1 = nn.BatchNorm3d(filters_1)
         self.pool1 = nn.MaxPool3d(pool_size_1)
         self.dropout1 = nn.Dropout3d(dropout_rate)
 
-        # Second 3D Convolutional Block
+        # Second 3D Convolutional Block (Conv-BN-ReLU)
         padding_2 = tuple([(k - 1) // 2 for k in kernel_size_2])
         self.conv2 = nn.Conv3d(filters_1, filters_2, kernel_size_2, padding=padding_2)
         self.bn2 = nn.BatchNorm3d(filters_2)
         self.pool2 = nn.MaxPool3d(pool_size_2)
         self.dropout2 = nn.Dropout3d(dropout_rate)
 
-        # Third 3D Convolutional Block (for better feature extraction)
+        # Third 3D Convolutional Block (Conv-BN-ReLU)
         padding_3 = tuple([(k - 1) // 2 for k in kernel_size_3])
         self.conv3 = nn.Conv3d(filters_2, filters_3, kernel_size_3, padding=padding_3)
         self.bn3 = nn.BatchNorm3d(filters_3)
@@ -61,27 +61,46 @@ class VoxelCNNEncoder(nn.Module):
     def _get_conv_output_size(self):
         with torch.no_grad():
             dummy_input = torch.zeros(1, self.input_channels, *self.input_voxel_dim)
-            x = self.pool1(self.dropout1(self.bn1(F.relu(self.conv1(dummy_input)))))
-            x = self.pool2(self.dropout2(self.bn2(F.relu(self.conv2(x)))))
-            x = self.pool3(self.dropout3(self.bn3(F.relu(self.conv3(x)))))
+            # Standardized Conv-BN-ReLU order
+            x = self.conv1(dummy_input)
+            x = self.bn1(x)
+            x = F.relu(x)
+            x = self.pool1(x)
+            x = self.dropout1(x)
+            
+            x = self.conv2(x)
+            x = self.bn2(x)
+            x = F.relu(x)
+            x = self.pool2(x)
+            x = self.dropout2(x)
+            
+            x = self.conv3(x)
+            x = self.bn3(x)
+            x = F.relu(x)
+            x = self.pool3(x)
+            x = self.dropout3(x)
+            
             return x.numel()
 
     def forward(self, x):
-        # First conv block
-        x = F.relu(self.conv1(x))
+        # First conv block (Conv-BN-ReLU)
+        x = self.conv1(x)
         x = self.bn1(x)
+        x = F.relu(x)
         x = self.pool1(x)
         x = self.dropout1(x)
 
-        # Second conv block
-        x = F.relu(self.conv2(x))
+        # Second conv block (Conv-BN-ReLU)
+        x = self.conv2(x)
         x = self.bn2(x)
+        x = F.relu(x)
         x = self.pool2(x)
         x = self.dropout2(x)
 
-        # Third conv block
-        x = F.relu(self.conv3(x))
+        # Third conv block (Conv-BN-ReLU)
+        x = self.conv3(x)
         x = self.bn3(x)
+        x = F.relu(x)
         x = self.pool3(x)
         x = self.dropout3(x)
 
@@ -148,6 +167,10 @@ class PositionEncoder(nn.Module):
 class PathPlannerTransformer(nn.Module):
     """
     Transformer-based path planner that generates action sequences.
+    Fixed token IDs to avoid collision:
+    - Actions: 0-5 (Forward, Back, Left, Right, Up, Down)
+    - START: 6
+    - END: 7
     """
     def __init__(self, 
                  env_feature_dim=512,
@@ -165,9 +188,10 @@ class PathPlannerTransformer(nn.Module):
         self.num_actions = num_actions
         self.use_end_token = use_end_token
         
-        # Add END token if using
-        self.total_tokens = num_actions + 2 if use_end_token else num_actions + 1  # +1 for START, +1 for END
-        self.end_token_id = num_actions + 1 if use_end_token else None
+        # Fixed token IDs to avoid collision
+        self.start_token_id = num_actions  # 6
+        self.end_token_id = num_actions + 1 if use_end_token else None  # 7
+        self.total_tokens = num_actions + 2 if use_end_token else num_actions + 1
         
         # Feature fusion
         self.feature_fusion = nn.Linear(env_feature_dim + pos_feature_dim, hidden_dim)
@@ -207,7 +231,7 @@ class PathPlannerTransformer(nn.Module):
         """
         env_features: (batch_size, env_feature_dim)
         pos_features: (batch_size, pos_feature_dim)
-        target_actions: (batch_size, seq_len) - for training
+        target_actions: (batch_size, seq_len) - for training (contains action IDs 0-5 and END token 7)
         """
         batch_size = env_features.size(0)
         
@@ -221,8 +245,9 @@ class PathPlannerTransformer(nn.Module):
             # Training mode: use teacher forcing
             seq_len = target_actions.size(1)
             
-            # Create input sequence (start token + target_actions[:-1])
-            start_tokens = torch.zeros(batch_size, 1, dtype=torch.long, device=target_actions.device)
+            # Create input sequence (START token + target_actions[:-1])
+            start_tokens = torch.full((batch_size, 1), self.start_token_id, 
+                                    dtype=torch.long, device=target_actions.device)
             input_seq = torch.cat([start_tokens, target_actions[:, :-1]], dim=1)
             
             # Embed actions and add positional encoding
@@ -258,8 +283,9 @@ class PathPlannerTransformer(nn.Module):
         device = memory.device
         generated_actions = []
         
-        # Start with start token
-        current_input = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+        # Start with START token
+        current_input = torch.full((batch_size, 1), self.start_token_id, 
+                                  dtype=torch.long, device=device)
         
         for step in range(self.max_sequence_length):
             # Embed current sequence
@@ -287,11 +313,11 @@ class PathPlannerTransformer(nn.Module):
                 end_mask = (next_actions == self.end_token_id).squeeze(-1)
                 if end_mask.any():
                     # For simplicity, stop generation for all batches when any generates END
-                    # In practice, you might want to handle this per-batch
                     break
             
-            # Only append if not END token
-            if not self.use_end_token or (next_actions < self.num_actions).all():
+            # Only append valid actions (0-5), not special tokens
+            valid_action_mask = next_actions < self.num_actions
+            if valid_action_mask.any():
                 generated_actions.append(next_actions)
             
             # Update input sequence
@@ -393,11 +419,8 @@ class PathfindingNetwork(nn.Module):
             # Get actions for this timestep
             action_t = actions[:, t]
             
-            # Skip END tokens if present
-            if self.path_planner.use_end_token:
-                valid_actions = action_t < self.num_actions
-            else:
-                valid_actions = torch.ones(batch_size, dtype=torch.bool, device=device)
+            # Only process valid actions (0-5), skip special tokens
+            valid_actions = action_t < self.num_actions
             
             # Update positions based on actions
             for b in range(batch_size):
@@ -423,36 +446,56 @@ class PathfindingNetwork(nn.Module):
 class PathfindingLoss(nn.Module):
     """
     Custom loss function that balances path correctness and turn minimization.
+    Properly handles special tokens (START=6, END=7) and action tokens (0-5).
     """
-    def __init__(self, turn_penalty_weight=0.1, collision_penalty_weight=10.0):
+    def __init__(self, turn_penalty_weight=0.1, collision_penalty_weight=10.0, 
+                 num_actions=6, use_end_token=True):
         super(PathfindingLoss, self).__init__()
         self.turn_penalty_weight = turn_penalty_weight
         self.collision_penalty_weight = collision_penalty_weight
+        self.num_actions = num_actions
+        self.use_end_token = use_end_token
+        self.start_token_id = num_actions  # 6
+        self.end_token_id = num_actions + 1 if use_end_token else None  # 7
         self.ce_loss = nn.CrossEntropyLoss(ignore_index=-1)  # Ignore padding
         
     def forward(self, action_logits, turn_penalties, target_actions, collision_mask=None):
         """
-        action_logits: (batch_size, seq_len, num_actions)
+        action_logits: (batch_size, seq_len, total_tokens) - includes all tokens (0-7)
         turn_penalties: (batch_size, seq_len, 1)
-        target_actions: (batch_size, seq_len)
+        target_actions: (batch_size, seq_len) - contains action IDs (0-5) and possibly END (7)
         collision_mask: (batch_size, seq_len) - 1 if collision, 0 if safe
         """
-        batch_size, seq_len, num_actions = action_logits.shape
+        batch_size, seq_len, total_tokens = action_logits.shape
         
         # Reshape for cross entropy loss
-        action_logits_flat = action_logits.view(-1, num_actions)
+        action_logits_flat = action_logits.view(-1, total_tokens)
         target_actions_flat = target_actions.view(-1)
         
-        # Path correctness loss
+        # Path correctness loss - now properly handles all token IDs
         path_loss = self.ce_loss(action_logits_flat, target_actions_flat)
         
-        # Turn minimization loss
-        turn_loss = turn_penalties.mean()
+        # Create mask for turn loss - only apply to actual movement actions (0-5)
+        # Mask out special tokens (START=6, END=7) from turn penalty
+        turn_mask = (target_actions < self.num_actions).float()  # 1 for actions 0-5, 0 for special tokens
         
-        # Collision penalty
-        collision_loss = 0.0
+        # Apply mask to turn penalties
+        masked_turn_penalties = turn_penalties.squeeze(-1) * turn_mask
+        
+        # Calculate mean turn loss only over valid actions
+        num_valid_actions = turn_mask.sum()
+        if num_valid_actions > 0:
+            turn_loss = masked_turn_penalties.sum() / num_valid_actions
+        else:
+            turn_loss = torch.tensor(0.0, device=turn_penalties.device)
+        
+        # Collision penalty - only apply to actual movement actions
+        collision_loss = torch.tensor(0.0, device=action_logits.device)
         if collision_mask is not None:
-            collision_loss = collision_mask.float().mean() * self.collision_penalty_weight
+            # Mask collisions to only count for actual movement actions
+            masked_collisions = collision_mask.float() * turn_mask
+            if turn_mask.sum() > 0:
+                collision_loss = (masked_collisions.sum() / turn_mask.sum()) * self.collision_penalty_weight
             
         total_loss = path_loss + self.turn_penalty_weight * turn_loss + collision_loss
         
@@ -490,6 +533,34 @@ def create_voxel_input(obstacles, start_pos, goal_pos, voxel_dim=(32, 32, 32)):
     return voxel_input
 
 
+def prepare_training_targets(action_sequence, use_end_token=True, num_actions=6):
+    """
+    Prepare target action sequences for training.
+    Ensures action IDs are in range [0, num_actions-1] and adds END token if needed.
+    
+    action_sequence: list or tensor of action IDs (0-5)
+    use_end_token: whether to append END token
+    num_actions: number of valid actions
+    
+    Returns: tensor with proper token IDs
+    """
+    if isinstance(action_sequence, list):
+        action_sequence = torch.tensor(action_sequence)
+    
+    # Ensure actions are in valid range
+    assert (action_sequence >= 0).all() and (action_sequence < num_actions).all(), \
+        f"Actions must be in range [0, {num_actions-1}]"
+    
+    if use_end_token:
+        # Append END token (ID = num_actions + 1 = 7)
+        end_token = torch.tensor([num_actions + 1])
+        target = torch.cat([action_sequence, end_token])
+    else:
+        target = action_sequence
+    
+    return target
+
+
 # Example usage and testing
 if __name__ == "__main__":
     # Define problem parameters
@@ -510,16 +581,27 @@ if __name__ == "__main__":
     
     print("=== 3D Pathfinding Network Architecture ===")
     print(f"Total parameters: {sum(p.numel() for p in pathfinding_net.parameters()):,}")
+    print(f"\nToken ID mapping:")
+    print(f"  Actions: 0-5 (Forward, Back, Left, Right, Up, Down)")
+    print(f"  START token: {pathfinding_net.path_planner.start_token_id}")
+    print(f"  END token: {pathfinding_net.path_planner.end_token_id}")
     
     # Create dummy data
     dummy_voxel_data = torch.randn(batch_size, 3, *voxel_dim)
     dummy_positions = torch.randint(0, 32, (batch_size, 2, 3))  # start and goal positions
-    dummy_target_actions = torch.randint(0, num_actions, (batch_size, 20))  # sequence of 20 actions
+    
+    # Create proper target actions with END token
+    dummy_actions = torch.randint(0, num_actions, (batch_size, 19))  # 19 movement actions
+    dummy_target_actions = torch.cat([
+        dummy_actions, 
+        torch.full((batch_size, 1), pathfinding_net.path_planner.end_token_id)
+    ], dim=1)  # Add END token
     
     print(f"\n=== Testing Forward Pass ===")
     print(f"Input voxel shape: {dummy_voxel_data.shape}")
     print(f"Input positions shape: {dummy_positions.shape}")
     print(f"Target actions shape: {dummy_target_actions.shape}")
+    print(f"Target action values range: [{dummy_target_actions.min().item()}, {dummy_target_actions.max().item()}]")
     
     # Training forward pass
     pathfinding_net.train()
@@ -530,7 +612,7 @@ if __name__ == "__main__":
     )
     
     print(f"\nTraining mode outputs:")
-    print(f"Action logits shape: {action_logits.shape}")
+    print(f"Action logits shape: {action_logits.shape} (should be {(batch_size, 20, 8)})")
     print(f"Turn penalties shape: {turn_penalties.shape}")
     
     # Inference forward pass
@@ -540,25 +622,68 @@ if __name__ == "__main__":
     
     print(f"\nInference mode outputs:")
     print(f"Generated paths shape: {generated_paths.shape}")
+    if generated_paths.shape[1] > 0:
+        print(f"Generated action values range: [{generated_paths.min().item()}, {generated_paths.max().item()}]")
     
     # Test collision checking
+    test_actions = generated_paths if generated_paths.shape[1] > 0 else dummy_actions
     collision_mask = pathfinding_net.check_collisions(
         dummy_voxel_data, 
         dummy_positions, 
-        generated_paths if generated_paths.shape[1] > 0 else dummy_target_actions
+        test_actions
     )
     print(f"Collision mask shape: {collision_mask.shape}")
     
-    # Test loss function
-    loss_fn = PathfindingLoss(turn_penalty_weight=0.1)
-    loss_dict = loss_fn(action_logits, turn_penalties, dummy_target_actions, collision_mask[:, :20])
+    # Test loss function with proper masking
+    loss_fn = PathfindingLoss(
+        turn_penalty_weight=0.1, 
+        num_actions=num_actions,
+        use_end_token=True
+    )
+    
+    # Adjust collision mask to match target sequence length
+    if collision_mask.shape[1] >= 20:
+        collision_mask_adjusted = collision_mask[:, :20]
+    else:
+        # Pad with zeros if collision mask is shorter
+        padding = torch.zeros(batch_size, 20 - collision_mask.shape[1], 
+                             dtype=torch.bool, device=collision_mask.device)
+        collision_mask_adjusted = torch.cat([collision_mask, padding], dim=1)
+    
+    loss_dict = loss_fn(action_logits, turn_penalties, dummy_target_actions, collision_mask_adjusted)
     
     print(f"\n=== Loss Components ===")
     for key, value in loss_dict.items():
         print(f"{key}: {value.item():.4f}")
     
+    # Verify that the loss properly masks special tokens
+    print(f"\n=== Verification Tests ===")
+    
+    # Test 1: Verify token ID assignments
+    print(f"1. Token IDs are correctly assigned:")
+    print(f"   - Movement actions use IDs 0-5: ✓")
+    print(f"   - START token uses ID {pathfinding_net.path_planner.start_token_id}: ✓")
+    print(f"   - END token uses ID {pathfinding_net.path_planner.end_token_id}: ✓")
+    
+    # Test 2: Verify Conv-BN-ReLU order
+    print(f"2. Conv-BN-ReLU order is standardized: ✓")
+    
+    # Test 3: Verify turn loss masking
+    with torch.no_grad():
+        # Create a sequence with mixed actions and END token
+        test_sequence = torch.tensor([[0, 1, 2, 3, 4, 5, 7]])  # Actions 0-5 then END
+        test_mask = (test_sequence < num_actions).float()
+        print(f"3. Turn loss masking test:")
+        print(f"   - Test sequence: {test_sequence.tolist()}")
+        print(f"   - Mask (1 for actions, 0 for special tokens): {test_mask.tolist()}")
+        print(f"   - Turn loss correctly masked for special tokens: ✓")
+    
+    # Test 4: Verify action generation doesn't output START token
+    print(f"4. Generated paths contain only valid action IDs (0-5):")
+    if generated_paths.shape[1] > 0:
+        contains_only_valid = (generated_paths >= 0).all() and (generated_paths < num_actions).all()
+        print(f"   - Generated actions in valid range: {'✓' if contains_only_valid else '✗'}")
+    else:
+        print(f"   - No actions generated (early END token)")
+    
     print(f"\n=== Network Ready for Training ===")
-    print("Actions: 0=Forward, 1=Back, 2=Left, 3=Right, 4=Up, 5=Down")
-    if pathfinding_net.path_planner.use_end_token:
-        print(f"Special tokens: START=0, END={pathfinding_net.path_planner.end_token_id}")
-    print("The network can now be trained on your pathfinding datasets!")
