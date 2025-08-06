@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import json
 
 # Import your network architecture (assuming it's in the same directory)
-# from pathfinding_nn import PathfindingNetwork, PathfindingLoss
+from pathfinding_nn import PathfindingNetwork, PathfindingLoss
 
 class SyntheticPathfindingDataset(Dataset):
     """

@@ -5,12 +5,12 @@ Key speed optimisations
 -----------------------
 1. **Geometry optional** – set `CREATE_GEOMETRY = False` (default) to skip
    every `primitive_cube_add` call and run Blender purely as a Python host.
-   Runtime drops from tens of seconds per scene to well under a second.
+   Runtime drops from hours per scene to well under a few seconds.
 2. **Single‑pass occupancy filling** – boundary walls are written directly to
-   the NumPy array; we no longer duplicate loops.
+   the NumPy array; no longer duplicate loops.
 3. **Scene clearing avoided** when no geometry is generated.
 
-If you *do* want visible voxels, flip `CREATE_GEOMETRY = True`; all the old
+If you *do* want visible voxels, flip `CREATE_GEOMETRY = True` but be warry of the big performance drop; all the old
 behaviour remains, but grouped behind a single flag.
 """
 
