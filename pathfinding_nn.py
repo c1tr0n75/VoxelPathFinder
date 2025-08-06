@@ -104,13 +104,21 @@ class PositionEncoder(nn.Module):
         self.voxel_dim = voxel_dim
         self.position_embed_dim = position_embed_dim
         
-        # Learned position embeddings for each dimension
-        self.x_embed = nn.Embedding(voxel_dim[0], position_embed_dim // 3)
-        self.y_embed = nn.Embedding(voxel_dim[1], position_embed_dim // 3)
-        self.z_embed = nn.Embedding(voxel_dim[2], position_embed_dim // 3)
+        # Calculate dimensions for each axis to sum to position_embed_dim
+        dim_per_axis = position_embed_dim // 3
+        remainder = position_embed_dim % 3
         
-        # Additional processing
-        self.fc = nn.Linear(position_embed_dim, position_embed_dim)
+        x_dim = dim_per_axis + (1 if remainder > 0 else 0)
+        y_dim = dim_per_axis + (1 if remainder > 1 else 0)
+        z_dim = dim_per_axis
+        
+        # Learned position embeddings for each dimension
+        self.x_embed = nn.Embedding(voxel_dim[0], x_dim)
+        self.y_embed = nn.Embedding(voxel_dim[1], y_dim)
+        self.z_embed = nn.Embedding(voxel_dim[2], z_dim)
+        
+        # Additional processing - fixed input dimension
+        self.fc = nn.Linear(2 * position_embed_dim, position_embed_dim)
         
     def forward(self, positions):
         """
@@ -124,15 +132,15 @@ class PositionEncoder(nn.Module):
         z_coords = positions[:, :, 2].long()  # (batch_size, 2)
         
         # Get embeddings
-        x_emb = self.x_embed(x_coords)  # (batch_size, 2, embed_dim//3)
-        y_emb = self.y_embed(y_coords)  # (batch_size, 2, embed_dim//3)
-        z_emb = self.z_embed(z_coords)  # (batch_size, 2, embed_dim//3)
+        x_emb = self.x_embed(x_coords)  # (batch_size, 2, x_dim)
+        y_emb = self.y_embed(y_coords)  # (batch_size, 2, y_dim)
+        z_emb = self.z_embed(z_coords)  # (batch_size, 2, z_dim)
         
         # Concatenate embeddings
-        pos_emb = torch.cat([x_emb, y_emb, z_emb], dim=-1)  # (batch_size, 2, embed_dim)
+        pos_emb = torch.cat([x_emb, y_emb, z_emb], dim=-1)  # (batch_size, 2, position_embed_dim)
         
         # Flatten start and goal embeddings
-        pos_emb = pos_emb.view(batch_size, -1)  # (batch_size, 2 * embed_dim)
+        pos_emb = pos_emb.view(batch_size, -1)  # (batch_size, 2 * position_embed_dim)
         
         return F.relu(self.fc(pos_emb))
 
@@ -148,21 +156,27 @@ class PathPlannerTransformer(nn.Module):
                  num_heads=8,
                  num_layers=4,
                  max_sequence_length=100,
-                 num_actions=6):  # Forward, Back, Left, Right, Up, Down
+                 num_actions=6,  # Forward, Back, Left, Right, Up, Down
+                 use_end_token=True):
         super(PathPlannerTransformer, self).__init__()
         
         self.hidden_dim = hidden_dim
         self.max_sequence_length = max_sequence_length
         self.num_actions = num_actions
+        self.use_end_token = use_end_token
+        
+        # Add END token if using
+        self.total_tokens = num_actions + 2 if use_end_token else num_actions + 1  # +1 for START, +1 for END
+        self.end_token_id = num_actions + 1 if use_end_token else None
         
         # Feature fusion
         self.feature_fusion = nn.Linear(env_feature_dim + pos_feature_dim, hidden_dim)
         
         # Action embeddings
-        self.action_embed = nn.Embedding(num_actions + 1, hidden_dim)  # +1 for start token
+        self.action_embed = nn.Embedding(self.total_tokens, hidden_dim)
         
-        # Positional encoding
-        self.pos_encoding = self._create_positional_encoding(max_sequence_length, hidden_dim)
+        # Positional encoding - register as buffer for proper device handling
+        self.register_buffer('pos_encoding', self._create_positional_encoding(max_sequence_length, hidden_dim))
         
         # Transformer decoder
         decoder_layer = nn.TransformerDecoderLayer(
@@ -175,7 +189,7 @@ class PathPlannerTransformer(nn.Module):
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers)
         
         # Output projection
-        self.output_proj = nn.Linear(hidden_dim, num_actions)
+        self.output_proj = nn.Linear(hidden_dim, self.total_tokens)
         
         # Turn penalty head (for minimizing turns)
         self.turn_penalty_head = nn.Linear(hidden_dim, 1)
@@ -213,7 +227,7 @@ class PathPlannerTransformer(nn.Module):
             
             # Embed actions and add positional encoding
             embedded = self.action_embed(input_seq)
-            embedded += self.pos_encoding[:, :seq_len, :].to(embedded.device)
+            embedded = embedded + self.pos_encoding[:, :seq_len, :]
             
             # Generate attention mask (causal mask)
             tgt_mask = self._generate_square_subsequent_mask(seq_len).to(embedded.device)
@@ -240,7 +254,7 @@ class PathPlannerTransformer(nn.Module):
         return mask
     
     def _generate_path(self, memory, batch_size):
-        """Generate path sequence autoregressively"""
+        """Generate path sequence autoregressively with early stopping"""
         device = memory.device
         generated_actions = []
         
@@ -251,7 +265,7 @@ class PathPlannerTransformer(nn.Module):
             # Embed current sequence
             embedded = self.action_embed(current_input)
             seq_len = embedded.size(1)
-            embedded += self.pos_encoding[:, :seq_len, :].to(device)
+            embedded = embedded + self.pos_encoding[:, :seq_len, :]
             
             # Generate causal mask
             tgt_mask = self._generate_square_subsequent_mask(seq_len).to(device)
@@ -267,14 +281,27 @@ class PathPlannerTransformer(nn.Module):
             next_action_logits = self.output_proj(output[:, -1, :])
             next_actions = torch.argmax(next_action_logits, dim=-1, keepdim=True)
             
-            generated_actions.append(next_actions)
+            # Check for early stopping with END token
+            if self.use_end_token:
+                # Check if any batch has generated END token
+                end_mask = (next_actions == self.end_token_id).squeeze(-1)
+                if end_mask.any():
+                    # For simplicity, stop generation for all batches when any generates END
+                    # In practice, you might want to handle this per-batch
+                    break
+            
+            # Only append if not END token
+            if not self.use_end_token or (next_actions < self.num_actions).all():
+                generated_actions.append(next_actions)
             
             # Update input sequence
             current_input = torch.cat([current_input, next_actions], dim=1)
-            
-            # Check for early stopping (could add end token logic here)
-            
-        return torch.cat(generated_actions, dim=1)
+        
+        if len(generated_actions) > 0:
+            return torch.cat(generated_actions, dim=1)
+        else:
+            # Return empty sequence if stopped immediately
+            return torch.zeros(batch_size, 0, dtype=torch.long, device=device)
 
 
 class PathfindingNetwork(nn.Module):
@@ -287,8 +314,12 @@ class PathfindingNetwork(nn.Module):
                  env_feature_dim=512,
                  pos_feature_dim=64,
                  hidden_dim=256,
-                 num_actions=6):
+                 num_actions=6,
+                 use_end_token=True):
         super(PathfindingNetwork, self).__init__()
+        
+        self.voxel_dim = voxel_dim
+        self.num_actions = num_actions
         
         self.voxel_encoder = VoxelCNNEncoder(
             input_channels=input_channels,
@@ -305,7 +336,8 @@ class PathfindingNetwork(nn.Module):
             env_feature_dim=env_feature_dim,
             pos_feature_dim=pos_feature_dim,
             hidden_dim=hidden_dim,
-            num_actions=num_actions
+            num_actions=num_actions,
+            use_end_token=use_end_token
         )
         
     def forward(self, voxel_data, positions, target_actions=None):
@@ -327,6 +359,65 @@ class PathfindingNetwork(nn.Module):
         else:
             generated_path = self.path_planner(env_features, pos_features)
             return generated_path
+    
+    def check_collisions(self, voxel_data, positions, actions):
+        """
+        Check if actions lead to collisions with obstacles.
+        
+        voxel_data: (batch_size, 3, D, H, W)
+        positions: (batch_size, 2, 3) - start positions
+        actions: (batch_size, seq_len) - action sequences
+        
+        Returns: (batch_size, seq_len) collision mask
+        """
+        batch_size, seq_len = actions.shape
+        device = actions.device
+        
+        # Extract obstacle channel
+        obstacles = voxel_data[:, 0, :, :, :]  # (batch_size, D, H, W)
+        
+        # Action to direction mapping
+        directions = torch.tensor([
+            [1, 0, 0],   # Forward (x+)
+            [-1, 0, 0],  # Back (x-)
+            [0, 1, 0],   # Left (y+)
+            [0, -1, 0],  # Right (y-)
+            [0, 0, 1],   # Up (z+)
+            [0, 0, -1]   # Down (z-)
+        ], dtype=torch.long, device=device)
+        
+        collision_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+        current_pos = positions[:, 0, :].clone()  # Start from start position
+        
+        for t in range(seq_len):
+            # Get actions for this timestep
+            action_t = actions[:, t]
+            
+            # Skip END tokens if present
+            if self.path_planner.use_end_token:
+                valid_actions = action_t < self.num_actions
+            else:
+                valid_actions = torch.ones(batch_size, dtype=torch.bool, device=device)
+            
+            # Update positions based on actions
+            for b in range(batch_size):
+                if valid_actions[b]:
+                    direction = directions[action_t[b]]
+                    new_pos = current_pos[b] + direction
+                    
+                    # Check bounds
+                    if (new_pos >= 0).all() and (new_pos[0] < self.voxel_dim[0]) and \
+                       (new_pos[1] < self.voxel_dim[1]) and (new_pos[2] < self.voxel_dim[2]):
+                        # Check collision
+                        if obstacles[b, new_pos[0], new_pos[1], new_pos[2]] > 0:
+                            collision_mask[b, t] = True
+                        else:
+                            current_pos[b] = new_pos
+                    else:
+                        # Out of bounds counts as collision
+                        collision_mask[b, t] = True
+        
+        return collision_mask
 
 
 class PathfindingLoss(nn.Module):
@@ -337,7 +428,7 @@ class PathfindingLoss(nn.Module):
         super(PathfindingLoss, self).__init__()
         self.turn_penalty_weight = turn_penalty_weight
         self.collision_penalty_weight = collision_penalty_weight
-        self.ce_loss = nn.CrossEntropyLoss()
+        self.ce_loss = nn.CrossEntropyLoss(ignore_index=-1)  # Ignore padding
         
     def forward(self, action_logits, turn_penalties, target_actions, collision_mask=None):
         """
@@ -361,7 +452,7 @@ class PathfindingLoss(nn.Module):
         # Collision penalty
         collision_loss = 0.0
         if collision_mask is not None:
-            collision_loss = (collision_mask.float()).mean() * self.collision_penalty_weight
+            collision_loss = collision_mask.float().mean() * self.collision_penalty_weight
             
         total_loss = path_loss + self.turn_penalty_weight * turn_loss + collision_loss
         
@@ -413,7 +504,8 @@ if __name__ == "__main__":
         env_feature_dim=512,
         pos_feature_dim=64,
         hidden_dim=256,
-        num_actions=num_actions
+        num_actions=num_actions,
+        use_end_token=True
     )
     
     print("=== 3D Pathfinding Network Architecture ===")
@@ -449,9 +541,17 @@ if __name__ == "__main__":
     print(f"\nInference mode outputs:")
     print(f"Generated paths shape: {generated_paths.shape}")
     
+    # Test collision checking
+    collision_mask = pathfinding_net.check_collisions(
+        dummy_voxel_data, 
+        dummy_positions, 
+        generated_paths if generated_paths.shape[1] > 0 else dummy_target_actions
+    )
+    print(f"Collision mask shape: {collision_mask.shape}")
+    
     # Test loss function
     loss_fn = PathfindingLoss(turn_penalty_weight=0.1)
-    loss_dict = loss_fn(action_logits, turn_penalties, dummy_target_actions)
+    loss_dict = loss_fn(action_logits, turn_penalties, dummy_target_actions, collision_mask[:, :20])
     
     print(f"\n=== Loss Components ===")
     for key, value in loss_dict.items():
@@ -459,4 +559,6 @@ if __name__ == "__main__":
     
     print(f"\n=== Network Ready for Training ===")
     print("Actions: 0=Forward, 1=Back, 2=Left, 3=Right, 4=Up, 5=Down")
+    if pathfinding_net.path_planner.use_end_token:
+        print(f"Special tokens: START=0, END={pathfinding_net.path_planner.end_token_id}")
     print("The network can now be trained on your pathfinding datasets!")
