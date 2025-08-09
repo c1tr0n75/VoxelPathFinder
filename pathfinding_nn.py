@@ -215,7 +215,7 @@ class PathPlannerTransformer(nn.Module):
         # Output projection
         self.output_proj = nn.Linear(hidden_dim, self.total_tokens)
         
-        # Turn penalty head (for minimizing turns)
+        # Turn head (now supervised via BCE-with-logits against turn labels)
         self.turn_penalty_head = nn.Linear(hidden_dim, 1)
         
     def _create_positional_encoding(self, max_len, d_model):
@@ -265,9 +265,10 @@ class PathPlannerTransformer(nn.Module):
             
             # Output projections
             action_logits = self.output_proj(output)
-            turn_penalties = self.turn_penalty_head(output)
+            # Turn logits for supervised turn classification
+            turn_logits = self.turn_penalty_head(output)
             
-            return action_logits, turn_penalties
+            return action_logits, turn_logits
         else:
             # Inference mode: generate sequence autoregressively
             return self._generate_path(memory, batch_size)
@@ -476,6 +477,7 @@ class PathfindingLoss(nn.Module):
     """
     Custom loss function that balances path correctness and turn minimization.
     Properly handles special tokens (START=6, END=7) and action tokens (0-5).
+    Turn loss is supervised: a turn occurs when consecutive valid actions differ.
     """
     def __init__(self, turn_penalty_weight=0.1, collision_penalty_weight=10.0, 
                  num_actions=6, use_end_token=True):
@@ -487,11 +489,13 @@ class PathfindingLoss(nn.Module):
         self.start_token_id = num_actions  # 6
         self.end_token_id = num_actions + 1 if use_end_token else None  # 7
         self.ce_loss = nn.CrossEntropyLoss(ignore_index=-1)  # Ignore padding
+        # BCE with logits for supervised turn prediction
+        self.turn_bce = nn.BCEWithLogitsLoss(reduction='sum')
         
     def forward(self, action_logits, turn_penalties, target_actions, collision_mask=None):
         """
         action_logits: (batch_size, seq_len, total_tokens) - includes all tokens (0-7)
-        turn_penalties: (batch_size, seq_len, 1)
+        turn_penalties: (batch_size, seq_len, 1) - interpreted as turn logits
         target_actions: (batch_size, seq_len) - contains action IDs (0-5) and possibly END (7)
         collision_mask: (batch_size, seq_len) - 1 if collision, 0 if safe
         """
@@ -504,27 +508,35 @@ class PathfindingLoss(nn.Module):
         # Path correctness loss - now properly handles all token IDs
         path_loss = self.ce_loss(action_logits_flat, target_actions_flat)
         
-        # Create mask for turn loss - only apply to actual movement actions (0-5)
-        # Mask out special tokens (START=6, END=7) from turn penalty
-        turn_mask = (target_actions < self.num_actions).float()  # 1 for actions 0-5, 0 for special tokens
+        # Supervised turn loss
+        # Compute valid action mask (exclude special tokens)
+        valid_actions_mask = (target_actions < self.num_actions)
+        # Previous actions (pad first timestep with itself; will be masked out anyway)
+        prev_actions = torch.cat([target_actions[:, :1], target_actions[:, :-1]], dim=1)
+        prev_valid_mask = torch.cat([torch.zeros_like(valid_actions_mask[:, :1], dtype=torch.bool),
+                                     valid_actions_mask[:, :-1]], dim=1)
+        # A turn occurs if both current and previous are valid actions and they differ
+        both_valid = valid_actions_mask & prev_valid_mask
+        is_turn = ((target_actions != prev_actions) & both_valid).float()
         
-        # Apply mask to turn penalties
-        masked_turn_penalties = turn_penalties.squeeze(-1) * turn_mask
+        # Turn logits predicted by the model
+        turn_logits = turn_penalties.squeeze(-1)
         
-        # Calculate mean turn loss only over valid actions
-        num_valid_actions = turn_mask.sum()
-        if num_valid_actions > 0:
-            turn_loss = masked_turn_penalties.sum() / num_valid_actions
+        # Compute BCE-with-logits only over valid pairs
+        num_pairs = both_valid.sum().clamp_min(1).float()
+        if num_pairs > 0:
+            bce_sum = self.turn_bce(turn_logits[both_valid], is_turn[both_valid])
+            turn_loss = bce_sum / num_pairs
         else:
-            turn_loss = torch.tensor(0.0, device=turn_penalties.device)
+            turn_loss = torch.tensor(0.0, device=action_logits.device)
         
         # Collision penalty - only apply to actual movement actions
         collision_loss = torch.tensor(0.0, device=action_logits.device)
         if collision_mask is not None:
             # Mask collisions to only count for actual movement actions
-            masked_collisions = collision_mask.float() * turn_mask
-            if turn_mask.sum() > 0:
-                collision_loss = (masked_collisions.sum() / turn_mask.sum()) * self.collision_penalty_weight
+            masked_collisions = collision_mask.float() * valid_actions_mask.float()
+            if valid_actions_mask.sum() > 0:
+                collision_loss = (masked_collisions.sum() / valid_actions_mask.sum()) * self.collision_penalty_weight
             
         total_loss = path_loss + self.turn_penalty_weight * turn_loss + collision_loss
         
@@ -642,7 +654,7 @@ if __name__ == "__main__":
     
     print(f"\nTraining mode outputs:")
     print(f"Action logits shape: {action_logits.shape} (should be {(batch_size, 20, 8)})")
-    print(f"Turn penalties shape: {turn_penalties.shape}")
+    print(f"Turn logits shape: {turn_penalties.shape}")
     
     # Inference forward pass
     pathfinding_net.eval()
@@ -697,15 +709,20 @@ if __name__ == "__main__":
     # Test 2: Verify Conv-BN-ReLU order
     print(f"2. Conv-BN-ReLU order is standardized: ✓")
     
-    # Test 3: Verify turn loss masking
+    # Test 3: Verify supervised turn labels mask
     with torch.no_grad():
         # Create a sequence with mixed actions and END token
         test_sequence = torch.tensor([[0, 1, 2, 3, 4, 5, 7]])  # Actions 0-5 then END
-        test_mask = (test_sequence < num_actions).float()
-        print(f"3. Turn loss masking test:")
+        valid_mask = (test_sequence < num_actions)
+        prev_seq = torch.cat([test_sequence[:, :1], test_sequence[:, :-1]], dim=1)
+        prev_valid = torch.cat([torch.zeros_like(valid_mask[:, :1], dtype=torch.bool), valid_mask[:, :-1]], dim=1)
+        both_valid = valid_mask & prev_valid
+        is_turn = ((test_sequence != prev_seq) & both_valid).float()
+        print(f"3. Supervised turn labels test:")
         print(f"   - Test sequence: {test_sequence.tolist()}")
-        print(f"   - Mask (1 for actions, 0 for special tokens): {test_mask.tolist()}")
-        print(f"   - Turn loss correctly masked for special tokens: ✓")
+        print(f"   - Valid mask: {valid_mask.tolist()}")
+        print(f"   - Both valid mask: {both_valid.tolist()}")
+        print(f"   - Turn labels: {is_turn.tolist()}")
     
     # Test 4: Verify action generation doesn't output START token
     print(f"4. Generated paths contain only valid action IDs (0-5):")
