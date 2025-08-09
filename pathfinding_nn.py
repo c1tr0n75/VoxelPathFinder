@@ -146,9 +146,10 @@ class PositionEncoder(nn.Module):
         batch_size = positions.size(0)
         
         # Extract coordinates
-        x_coords = positions[:, :, 0].long()  # (batch_size, 2)
-        y_coords = positions[:, :, 1].long()  # (batch_size, 2)
-        z_coords = positions[:, :, 2].long()  # (batch_size, 2)
+        # Clamp coordinates defensively to valid index ranges to avoid embedding OOB
+        x_coords = positions[:, :, 0].long().clamp_(0, self.voxel_dim[0] - 1)  # (batch_size, 2)
+        y_coords = positions[:, :, 1].long().clamp_(0, self.voxel_dim[1] - 1)  # (batch_size, 2)
+        z_coords = positions[:, :, 2].long().clamp_(0, self.voxel_dim[2] - 1)  # (batch_size, 2)
         
         # Get embeddings
         x_emb = self.x_embed(x_coords)  # (batch_size, 2, x_dim)
@@ -171,6 +172,7 @@ class PathPlannerTransformer(nn.Module):
     - Actions: 0-5 (Forward, Back, Left, Right, Up, Down)
     - START: 6
     - END: 7
+    - PAD: 8 (used only for teacher forcing inputs; targets still use -1 for ignore)
     """
     def __init__(self, 
                  env_feature_dim=512,
@@ -191,7 +193,10 @@ class PathPlannerTransformer(nn.Module):
         # Fixed token IDs to avoid collision
         self.start_token_id = num_actions  # 6
         self.end_token_id = num_actions + 1 if use_end_token else None  # 7
-        self.total_tokens = num_actions + 2 if use_end_token else num_actions + 1
+        # Reserve a PAD token for embedding inputs during teacher forcing
+        self.pad_token_id = (num_actions + 2) if use_end_token else (num_actions + 1)
+        # Total tokens include PAD
+        self.total_tokens = (num_actions + 3) if use_end_token else (num_actions + 2)
         
         # Feature fusion
         self.feature_fusion = nn.Linear(env_feature_dim + pos_feature_dim, hidden_dim)
@@ -248,6 +253,8 @@ class PathPlannerTransformer(nn.Module):
             start_tokens = torch.full((batch_size, 1), self.start_token_id, 
                                     dtype=torch.long, device=target_actions.device)
             input_seq = torch.cat([start_tokens, target_actions[:, :-1]], dim=1)
+            # Replace padding (-1) in teacher-forced inputs with PAD token id to avoid OOB in embedding
+            input_seq = torch.where(input_seq < 0, torch.full_like(input_seq, self.pad_token_id), input_seq)
             
             # Embed actions and add positional encoding
             embedded = self.action_embed(input_seq)
