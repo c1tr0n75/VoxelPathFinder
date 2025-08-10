@@ -77,7 +77,7 @@ python main_training_script.py
 Once the training is done, you can use the final model in ./training_outputs/final_model.pth for inference.
 There is 2 python files to test inference : 
 - sampled_model_test.py : used to test the final model generating a path from the sample dataset
-- randomized_model_test : used to test the final model in a random sample
+- randomized_model_test.py : used to test the final model in a random sample
 
 ## Contributing
 
