@@ -1,7 +1,8 @@
 import numpy as np
+import os
 
-# Path to a generated file
-fname = r".\sample_0001.npz"
+# Path to a generated file (cross-platform, relative to this script)
+fname = os.path.join(os.path.dirname(__file__), "sample_0620.npz")
 
 # Load
 data = np.load(fname)
