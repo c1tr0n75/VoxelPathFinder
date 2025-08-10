@@ -1,4 +1,4 @@
-# 3D Path Planning Neural Network
+# Voxel Path Finder Neural Network
 
 This repository contains code and tools for training and evaluating a neural network for 3D path planning tasks, designed to be used within the **Blender 3D environment**. The project includes dataset generation, inspection utilities, model training scripts, and sample datasets.
 
